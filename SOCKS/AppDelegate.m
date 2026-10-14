@@ -16,6 +16,31 @@
 @interface AppDelegate ()
 @end
 
+// iOS 27 SDK 起強制採用 UIScene 生命週期，否則啟動即閃退
+@interface SceneDelegate : UIResponder <UIWindowSceneDelegate>
+@property (strong, nonatomic) UIWindow *window;
+@end
+
+@implementation SceneDelegate
+
+- (void)sceneWillResignActive:(UIScene *)scene {
+    [ViewController logMessage:@"[SOCKS] Scene will resign active state"];
+}
+
+- (void)sceneDidEnterBackground:(UIScene *)scene {
+    [ViewController logMessage:@"[SOCKS] Scene entered background"];
+}
+
+- (void)sceneWillEnterForeground:(UIScene *)scene {
+    [ViewController logMessage:@"[SOCKS] Scene will enter foreground"];
+}
+
+- (void)sceneDidBecomeActive:(UIScene *)scene {
+    [ViewController logMessage:@"[SOCKS] Scene became active"];
+}
+
+@end
+
 @implementation AppDelegate
 
 + (NSString *)deviceIPAddress
