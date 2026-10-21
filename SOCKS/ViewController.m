@@ -8,6 +8,7 @@
 
 #import "ViewController.h"
 #import "AppDelegate.h"
+#import "DeviceIdentifier.h"
 #include <stdio.h>
 #include <unistd.h>
 #include <stdarg.h>
@@ -26,6 +27,7 @@ typedef NS_ENUM(NSInteger, ServerState) {
 @property (copy, nonatomic) NSString *ipAddress;
 @property (assign, nonatomic) int port;
 @property (strong, nonatomic) NSMutableDictionary<NSString *, NSNumber *> *activeClients; // IP → 連線數
+@property (strong, nonatomic) NSMutableDictionary<NSString *, NSDictionary *> *deviceInfo; // IP → 名稱與種類
 
 @property (strong, nonatomic) UIView *statusDot;
 @property (strong, nonatomic) UILabel *statusTitleLabel;
@@ -90,10 +92,10 @@ static pthread_mutex_t pending_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
         double uploadSpeed = (uploadBytes - lastUploadBytes) / elapsed;
         double downloadSpeed = (downloadBytes - lastDownloadBytes) / elapsed;
 
-        self.uploadSpeedLabel.text = [self formatSpeed:uploadSpeed];
-        self.downloadSpeedLabel.text = [self formatSpeed:downloadSpeed];
-        self.uploadTotalLabel.text = [NSString stringWithFormat:@"累計 %@", [self formatBytes:uploadBytes]];
-        self.downloadTotalLabel.text = [NSString stringWithFormat:@"累計 %@", [self formatBytes:downloadBytes]];
+        self.uploadSpeedLabel.text = [NSString stringWithFormat:@"%.2f MB/s", uploadSpeed / (1024.0 * 1024.0)];
+        self.downloadSpeedLabel.text = [NSString stringWithFormat:@"%.2f MB/s", downloadSpeed / (1024.0 * 1024.0)];
+        self.uploadTotalLabel.text = [NSString stringWithFormat:@"累計 %.2f GB", uploadBytes / (1024.0 * 1024.0 * 1024.0)];
+        self.downloadTotalLabel.text = [NSString stringWithFormat:@"累計 %.2f GB", downloadBytes / (1024.0 * 1024.0 * 1024.0)];
     }
 
     lastUploadBytes = uploadBytes;
@@ -113,6 +115,16 @@ void client_connected(const char *clientIP) {
     dispatch_async(dispatch_get_main_queue(), ^{
         ViewController *vc = sharedInstance;
         vc.activeClients[ip] = @(vc.activeClients[ip].integerValue + 1);
+        if (!vc.deviceInfo[ip]) {
+            vc.deviceInfo[ip] = @{@"kind": @"辨識中…"};
+            [DeviceIdentifier identifyIP:ip completion:^(NSString *name, NSString *kind, NSString *mac) {
+                NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:kind forKey:@"kind"];
+                info[@"name"] = name;
+                info[@"mac"] = mac;
+                vc.deviceInfo[ip] = info;
+                [vc refreshClients];
+            }];
+        }
         [vc refreshClients];
     });
 }
@@ -193,8 +205,8 @@ void custom_log(const char *format, ...) {
     UILabel *titleLabel = [self labelWithStyle:UIFontTextStyleSubheadline color:[UIColor secondaryLabelColor]];
     titleLabel.text = title;
     speed.font = [UIFont monospacedDigitSystemFontOfSize:24 weight:UIFontWeightSemibold];
-    speed.text = @"0 B/s";
-    total.text = @"累計 0 B";
+    speed.text = @"0.00 MB/s";
+    total.text = @"累計 0.00 GB";
     UIStackView *column = [[UIStackView alloc] initWithArrangedSubviews:@[titleLabel, speed, total]];
     column.axis = UILayoutConstraintAxisVertical;
     column.spacing = 2;
@@ -277,12 +289,7 @@ void custom_log(const char *format, ...) {
     UILabel *footer = [self labelWithStyle:UIFontTextStyleFootnote color:[UIColor secondaryLabelColor]];
     footer.text = @"App 可以切到背景繼續運作，但不要從多工畫面把它滑掉。";
 
-    UILabel *appTitle = [self labelWithStyle:UIFontTextStyleLargeTitle color:[UIColor labelColor]];
-    appTitle.font = [UIFont systemFontOfSize:appTitle.font.pointSize weight:UIFontWeightBold];
-    appTitle.text = @"SocksBypass";
-
     UIStackView *content = [[UIStackView alloc] initWithArrangedSubviews:@[
-        appTitle,
         [self cardWithTitle:@"狀態" content:statusStack],
         [self cardWithTitle:@"電腦端設定" content:setupStack],
         [self cardWithTitle:@"目前速度" content:trafficStack],
@@ -362,13 +369,32 @@ void custom_log(const char *format, ...) {
         empty.text = @"目前沒有裝置連線";
         [self.deviceListStack addArrangedSubview:empty];
     }
+    NSDictionary *icons = @{@"Mac": @"💻", @"Windows": @"🖥️", @"iPhone": @"📱", @"iPad": @"📱", @"Apple 裝置": @"🍎"};
     for (NSString *ip in ips) {
+        NSDictionary *info = self.deviceInfo[ip];
+        NSString *kind = info[@"kind"] ?: @"辨識中…";
+        UILabel *icon = [UILabel new];
+        icon.font = [UIFont systemFontOfSize:28];
+        icon.text = icons[kind] ?: @"❔";
+        [icon setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
         UILabel *name = [self labelWithStyle:UIFontTextStyleBody color:[UIColor labelColor]];
-        name.text = [@"💻 " stringByAppendingString:ip];
-        UILabel *count = [self labelWithStyle:UIFontTextStyleSubheadline color:[UIColor secondaryLabelColor]];
-        count.text = [NSString stringWithFormat:@"%@ 條連線", self.activeClients[ip]];
-        count.textAlignment = NSTextAlignmentRight;
-        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[name, count]];
+        name.text = info[@"name"] ?: kind;
+        UILabel *detail = [self labelWithStyle:UIFontTextStyleFootnote color:[UIColor secondaryLabelColor]];
+        detail.text = [NSString stringWithFormat:@"%@%@ · %@ 條連線",
+                       info[@"name"] ? [kind stringByAppendingString:@" · "] : @"", ip, self.activeClients[ip]];
+        UILabel *mac = [self labelWithStyle:UIFontTextStyleFootnote color:[UIColor secondaryLabelColor]];
+        if (info[@"mac"]) {
+            mac.text = [@"MAC " stringByAppendingString:info[@"mac"]];
+        } else if (info[@"name"]) {
+            mac.text = @"MAC：Apple 裝置不提供";
+        }
+        mac.hidden = mac.text == nil;
+        UIStackView *text = [[UIStackView alloc] initWithArrangedSubviews:@[name, detail, mac]];
+        text.axis = UILayoutConstraintAxisVertical;
+        text.spacing = 2;
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[icon, text]];
+        row.spacing = 12;
+        row.alignment = UIStackViewAlignmentCenter;
         [self.deviceListStack addArrangedSubview:row];
     }
     [self refreshStatus];
@@ -408,6 +434,7 @@ void custom_log(const char *format, ...) {
     [super viewDidLoad];
     sharedInstance = self;
     self.activeClients = [NSMutableDictionary dictionary];
+    self.deviceInfo = [NSMutableDictionary dictionary];
     self.serverState = ServerStateStarting;
     [self buildInterface];
 

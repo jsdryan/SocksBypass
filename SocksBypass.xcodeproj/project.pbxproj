@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D3E1C0A2212A29D600540E3A /* DeviceIdentifier.m in Sources */ = {isa = PBXBuildFile; fileRef = D3E1C0A1212A29D600540E3A /* DeviceIdentifier.m */; };
 		7F1F2723212A29D600540E3A /* AppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = 7F1F2722212A29D600540E3A /* AppDelegate.m */; };
 		7F1F2726212A29D600540E3A /* ViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 7F1F2725212A29D600540E3A /* ViewController.m */; };
 		7F1F2729212A29D600540E3A /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 7F1F2727212A29D600540E3A /* Main.storyboard */; };
@@ -20,6 +21,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		D3E1C0A0212A29D600540E3A /* DeviceIdentifier.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DeviceIdentifier.h; sourceTree = "<group>"; };
+		D3E1C0A1212A29D600540E3A /* DeviceIdentifier.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = DeviceIdentifier.m; sourceTree = "<group>"; };
 		7F1F271E212A29D600540E3A /* SocksBypass.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SocksBypass.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7F1F2721212A29D600540E3A /* AppDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppDelegate.h; sourceTree = "<group>"; };
 		7F1F2722212A29D600540E3A /* AppDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppDelegate.m; sourceTree = "<group>"; };
@@ -72,6 +75,8 @@
 				7F4FA082212A2AD000F14A55 /* sockssrv.c */,
 				7F1F2721212A29D600540E3A /* AppDelegate.h */,
 				7F1F2722212A29D600540E3A /* AppDelegate.m */,
+				D3E1C0A0212A29D600540E3A /* DeviceIdentifier.h */,
+				D3E1C0A1212A29D600540E3A /* DeviceIdentifier.m */,
 				7F1F2724212A29D600540E3A /* ViewController.h */,
 				7F1F2725212A29D600540E3A /* ViewController.m */,
 				7F1F2727212A29D600540E3A /* Main.storyboard */,
@@ -158,6 +163,7 @@
 				7F1F2726212A29D600540E3A /* ViewController.m in Sources */,
 				7F1F2731212A29D600540E3A /* main.m in Sources */,
 				7F1F2723212A29D600540E3A /* AppDelegate.m in Sources */,
+				D3E1C0A2212A29D600540E3A /* DeviceIdentifier.m in Sources */,
 				7F4FA086212A2AD000F14A55 /* sockssrv.c in Sources */,
 				7F4FA084212A2AD000F14A55 /* server.c in Sources */,
 				7F4FA085212A2AD000F14A55 /* sblist.c in Sources */,

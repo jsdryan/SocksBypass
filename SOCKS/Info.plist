@@ -39,6 +39,8 @@
 			</array>
 		</dict>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用來查出連線中的裝置名稱（例如 Mac、Windows、iPhone）。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
