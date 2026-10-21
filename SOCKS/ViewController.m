@@ -135,8 +135,10 @@ void custom_log(const char *format, ...) {
                 UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault
                                                                handler:^(UIAlertAction * action) {
                     [self.statusLabel setText:@"Not Running - No Network Interface"];
-                    [self.audioPlayer stop];
-                    [[AVAudioSession sharedInstance] setActive:NO error:nil];
+                    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                        [self.audioPlayer stop];
+                        [[AVAudioSession sharedInstance] setActive:NO error:nil];
+                    });
                     [[UIApplication sharedApplication] performSelector:NSSelectorFromString(@"terminate:") withObject:nil afterDelay:0.0];
                 }];
                 [alert addAction:okAction];
@@ -161,30 +163,33 @@ void custom_log(const char *format, ...) {
     [self logMessage:@"[SOCKS] Setting up background audio"];
     NSURL *url = [NSURL fileURLWithPath:[[NSBundle mainBundle] pathForResource:@"blank" ofType:@"wav"]];
     if (url) {
-        NSError *error = nil;
-        self.audioPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:&error];
-        if (error) {
-            [self logMessage:[NSString stringWithFormat:@"[SOCKS] Error creating audio player: %@", error.localizedDescription]];
-        } else {
-            [self logMessage:@"[SOCKS] Successfully created audio player"];
-            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback 
-                                           withOptions:AVAudioSessionCategoryOptionMixWithOthers 
-                                                 error:&error];
+        // AVAudioSession 啟用可能卡住數百毫秒，不要放在主執行緒
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSError *error = nil;
+            self.audioPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:&error];
             if (error) {
-                [self logMessage:[NSString stringWithFormat:@"[SOCKS] Error setting audio session category: %@", error.localizedDescription]];
+                [self logMessage:[NSString stringWithFormat:@"[SOCKS] Error creating audio player: %@", error.localizedDescription]];
+            } else {
+                [self logMessage:@"[SOCKS] Successfully created audio player"];
+                [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback 
+                                               withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+                                                     error:&error];
+                if (error) {
+                    [self logMessage:[NSString stringWithFormat:@"[SOCKS] Error setting audio session category: %@", error.localizedDescription]];
+                }
+                
+                [[AVAudioSession sharedInstance] setActive:YES error:&error];
+                if (error) {
+                    [self logMessage:[NSString stringWithFormat:@"[SOCKS] Error activating audio session: %@", error.localizedDescription]];
+                }
+                
+                [self.audioPlayer setVolume:0.01];
+                [self.audioPlayer setNumberOfLoops:-1];
+                [self.audioPlayer prepareToPlay];
+                BOOL playSuccess = [self.audioPlayer play];
+                [self logMessage:[NSString stringWithFormat:@"[SOCKS] Background audio %@ start", playSuccess ? @"did" : @"failed to"]];
             }
-            
-            [[AVAudioSession sharedInstance] setActive:YES error:&error];
-            if (error) {
-                [self logMessage:[NSString stringWithFormat:@"[SOCKS] Error activating audio session: %@", error.localizedDescription]];
-            }
-            
-            [self.audioPlayer setVolume:0.01];
-            [self.audioPlayer setNumberOfLoops:-1];
-            [self.audioPlayer prepareToPlay];
-            BOOL playSuccess = [self.audioPlayer play];
-            [self logMessage:[NSString stringWithFormat:@"[SOCKS] Background audio %@ start", playSuccess ? @"did" : @"failed to"]];
-        }
+        });
     } else {
         [self logMessage:@"[SOCKS] Error: Could not find blank.wav resource"];
     }
