@@ -137,7 +137,7 @@ void custom_log(const char *format, ...) {
                     [self.statusLabel setText:@"Not Running - No Network Interface"];
                     [self.audioPlayer stop];
                     [[AVAudioSession sharedInstance] setActive:NO error:nil];
-                    [[UIApplication sharedApplication] performSelector:@selector(terminate:) withObject:nil afterDelay:0.0];
+                    [[UIApplication sharedApplication] performSelector:NSSelectorFromString(@"terminate:") withObject:nil afterDelay:0.0];
                 }];
                 [alert addAction:okAction];
                 [self presentViewController:alert animated:YES completion:nil];

@@ -84,7 +84,7 @@ int sblist_search(sblist* l, char* item1, item_compare cmp) {
     for (i = 0; i < l->count; i++) {
         char* item2 = sblist_item_from_index(l, i);
         if (0 == cmp(item1, item2)) {
-            return i;
+            return (int) i;
         }
     }
     return -1;
