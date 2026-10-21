@@ -13,7 +13,31 @@
 #include <stdarg.h>
 #include <pthread.h>
 
+typedef NS_ENUM(NSInteger, ServerState) {
+    ServerStateStarting,
+    ServerStateRunning,
+    ServerStateNoNetwork,
+    ServerStateFailed,
+};
+
 @interface ViewController ()
+
+@property (assign, nonatomic) ServerState serverState;
+@property (copy, nonatomic) NSString *ipAddress;
+@property (assign, nonatomic) int port;
+@property (strong, nonatomic) NSMutableDictionary<NSString *, NSNumber *> *activeClients; // IP → 連線數
+
+@property (strong, nonatomic) UIView *statusDot;
+@property (strong, nonatomic) UILabel *statusTitleLabel;
+@property (strong, nonatomic) UILabel *statusDetailLabel;
+@property (strong, nonatomic) UILabel *addressValueLabel;
+@property (strong, nonatomic) UILabel *portValueLabel;
+@property (strong, nonatomic) UILabel *uploadSpeedLabel;
+@property (strong, nonatomic) UILabel *downloadSpeedLabel;
+@property (strong, nonatomic) UILabel *uploadTotalLabel;
+@property (strong, nonatomic) UILabel *downloadTotalLabel;
+@property (strong, nonatomic) UIStackView *deviceListStack;
+@property (strong, nonatomic) UIButton *logToggleButton;
 
 @end
 
@@ -22,6 +46,8 @@
 extern int socks_main(int argc, const char** argv);
 extern void custom_log(const char *format, ...);
 extern void update_traffic_stats_ui(uint64_t uploadBytes, uint64_t downloadBytes);
+extern void client_connected(const char *clientIP);
+extern void client_disconnected(const char *clientIP);
 static ViewController *sharedInstance = nil;
 
 #define MAX_LOG_LINES 1000
@@ -59,20 +85,17 @@ static pthread_mutex_t pending_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
 - (void)updateStatsWithUpload:(uint64_t)uploadBytes download:(uint64_t)downloadBytes {
     NSDate *now = [NSDate date];
     NSTimeInterval elapsed = [now timeIntervalSinceDate:lastUpdateTime ?: now];
-    
+
     if (lastUpdateTime && elapsed > 0) {
         double uploadSpeed = (uploadBytes - lastUploadBytes) / elapsed;
         double downloadSpeed = (downloadBytes - lastDownloadBytes) / elapsed;
-        
-        NSString *stats = [NSString stringWithFormat:@"↑ %@ (%@) ↓ %@ (%@)", 
-            [self formatBytes:uploadBytes],
-            [self formatSpeed:uploadSpeed],
-            [self formatBytes:downloadBytes],
-            [self formatSpeed:downloadSpeed]];
-            
-        self.statsLabel.text = stats;
+
+        self.uploadSpeedLabel.text = [self formatSpeed:uploadSpeed];
+        self.downloadSpeedLabel.text = [self formatSpeed:downloadSpeed];
+        self.uploadTotalLabel.text = [NSString stringWithFormat:@"累計 %@", [self formatBytes:uploadBytes]];
+        self.downloadTotalLabel.text = [NSString stringWithFormat:@"累計 %@", [self formatBytes:downloadBytes]];
     }
-    
+
     lastUploadBytes = uploadBytes;
     lastDownloadBytes = downloadBytes;
     lastUpdateTime = now;
@@ -84,82 +107,355 @@ void update_traffic_stats_ui(uint64_t uploadBytes, uint64_t downloadBytes) {
     pending_download_bytes = downloadBytes;
     pthread_mutex_unlock(&pending_stats_mutex);
 }
+
+void client_connected(const char *clientIP) {
+    NSString *ip = [NSString stringWithUTF8String:clientIP];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ViewController *vc = sharedInstance;
+        vc.activeClients[ip] = @(vc.activeClients[ip].integerValue + 1);
+        [vc refreshClients];
+    });
+}
+
+void client_disconnected(const char *clientIP) {
+    NSString *ip = [NSString stringWithUTF8String:clientIP];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ViewController *vc = sharedInstance;
+        NSInteger count = vc.activeClients[ip].integerValue - 1;
+        vc.activeClients[ip] = count > 0 ? @(count) : nil;
+        [vc refreshClients];
+    });
+}
+
 void custom_log(const char *format, ...) {
     char buffer[1024];
     va_list args;
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
-    
+
     [ViewController logFromC:buffer];
     // Also write to stderr for Xcode console
     fprintf(stderr, "%s\n", buffer);
 }
 
+#pragma mark - 介面
+
+- (UILabel *)labelWithStyle:(UIFontTextStyle)style color:(UIColor *)color {
+    UILabel *label = [UILabel new];
+    label.font = [UIFont preferredFontForTextStyle:style];
+    label.adjustsFontForContentSizeCategory = YES;
+    label.textColor = color;
+    label.numberOfLines = 0;
+    return label;
+}
+
+- (UIView *)cardWithTitle:(NSString *)title content:(UIView *)content {
+    UILabel *header = [self labelWithStyle:UIFontTextStyleFootnote color:[UIColor secondaryLabelColor]];
+    header.text = title;
+
+    UIView *card = [UIView new];
+    card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    card.layer.cornerRadius = 14;
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:content];
+    [NSLayoutConstraint activateConstraints:@[
+        [content.topAnchor constraintEqualToAnchor:card.topAnchor constant:16],
+        [content.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-16],
+        [content.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [content.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
+    ]];
+
+    UIStackView *section = [[UIStackView alloc] initWithArrangedSubviews:@[header, card]];
+    section.axis = UILayoutConstraintAxisVertical;
+    section.spacing = 6;
+    return section;
+}
+
+- (UIStackView *)rowWithName:(NSString *)name value:(UILabel *)valueLabel {
+    UILabel *nameLabel = [self labelWithStyle:UIFontTextStyleBody color:[UIColor labelColor]];
+    nameLabel.text = name;
+    valueLabel.textAlignment = NSTextAlignmentRight;
+    [valueLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[nameLabel, valueLabel]];
+    row.spacing = 8;
+    return row;
+}
+
+- (UIView *)separator {
+    UIView *line = [UIView new];
+    line.backgroundColor = [UIColor separatorColor];
+    [line.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale].active = YES;
+    return line;
+}
+
+- (UIStackView *)trafficColumnWithTitle:(NSString *)title speed:(UILabel *)speed total:(UILabel *)total {
+    UILabel *titleLabel = [self labelWithStyle:UIFontTextStyleSubheadline color:[UIColor secondaryLabelColor]];
+    titleLabel.text = title;
+    speed.font = [UIFont monospacedDigitSystemFontOfSize:24 weight:UIFontWeightSemibold];
+    speed.text = @"0 B/s";
+    total.text = @"累計 0 B";
+    UIStackView *column = [[UIStackView alloc] initWithArrangedSubviews:@[titleLabel, speed, total]];
+    column.axis = UILayoutConstraintAxisVertical;
+    column.spacing = 2;
+    return column;
+}
+
+- (void)buildInterface {
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+
+    // 狀態
+    self.statusDot = [UIView new];
+    self.statusDot.layer.cornerRadius = 7;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.statusDot.widthAnchor constraintEqualToConstant:14],
+        [self.statusDot.heightAnchor constraintEqualToConstant:14],
+    ]];
+    self.statusTitleLabel = [self labelWithStyle:UIFontTextStyleTitle2 color:[UIColor labelColor]];
+    self.statusTitleLabel.font = [UIFont systemFontOfSize:self.statusTitleLabel.font.pointSize weight:UIFontWeightBold];
+    UIStackView *titleRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.statusDot, self.statusTitleLabel]];
+    titleRow.spacing = 10;
+    titleRow.alignment = UIStackViewAlignmentCenter;
+    self.statusDetailLabel = [self labelWithStyle:UIFontTextStyleSubheadline color:[UIColor secondaryLabelColor]];
+    UIStackView *statusStack = [[UIStackView alloc] initWithArrangedSubviews:@[titleRow, self.statusDetailLabel]];
+    statusStack.axis = UILayoutConstraintAxisVertical;
+    statusStack.spacing = 6;
+
+    // 電腦端設定
+    UILabel *typeValue = [self labelWithStyle:UIFontTextStyleBody color:[UIColor secondaryLabelColor]];
+    typeValue.text = @"SOCKS5";
+    self.addressValueLabel = [self labelWithStyle:UIFontTextStyleBody color:[UIColor systemBlueColor]];
+    self.addressValueLabel.text = @"—";
+    self.portValueLabel = [self labelWithStyle:UIFontTextStyleBody color:[UIColor systemBlueColor]];
+    self.portValueLabel.text = @"—";
+    UILabel *authValue = [self labelWithStyle:UIFontTextStyleBody color:[UIColor secondaryLabelColor]];
+    authValue.text = @"不需要";
+    UIStackView *addressRow = [self rowWithName:@"伺服器位址" value:self.addressValueLabel];
+    UIStackView *portRow = [self rowWithName:@"連接埠" value:self.portValueLabel];
+    [addressRow addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(copyAddress:)]];
+    [portRow addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(copyPort:)]];
+    UILabel *setupHint = [self labelWithStyle:UIFontTextStyleFootnote color:[UIColor secondaryLabelColor]];
+    setupHint.text = @"在電腦的代理伺服器設定填入以上資料。點藍字可以拷貝。";
+    UIStackView *setupStack = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self rowWithName:@"代理類型" value:typeValue], [self separator],
+        addressRow, [self separator],
+        portRow, [self separator],
+        [self rowWithName:@"帳號密碼" value:authValue], setupHint,
+    ]];
+    setupStack.axis = UILayoutConstraintAxisVertical;
+    setupStack.spacing = 12;
+
+    // 流量
+    self.uploadSpeedLabel = [self labelWithStyle:UIFontTextStyleBody color:[UIColor labelColor]];
+    self.downloadSpeedLabel = [self labelWithStyle:UIFontTextStyleBody color:[UIColor labelColor]];
+    self.uploadTotalLabel = [self labelWithStyle:UIFontTextStyleFootnote color:[UIColor secondaryLabelColor]];
+    self.downloadTotalLabel = [self labelWithStyle:UIFontTextStyleFootnote color:[UIColor secondaryLabelColor]];
+    UIStackView *trafficStack = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self trafficColumnWithTitle:@"↓ 下載" speed:self.downloadSpeedLabel total:self.downloadTotalLabel],
+        [self trafficColumnWithTitle:@"↑ 上傳" speed:self.uploadSpeedLabel total:self.uploadTotalLabel],
+    ]];
+    trafficStack.distribution = UIStackViewDistributionFillEqually;
+
+    // 使用中的裝置
+    self.deviceListStack = [UIStackView new];
+    self.deviceListStack.axis = UILayoutConstraintAxisVertical;
+    self.deviceListStack.spacing = 10;
+
+    // 詳細記錄（預設收起）
+    self.logToggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.logToggleButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+    [self.logToggleButton addTarget:self action:@selector(toggleLog) forControlEvents:UIControlEventTouchUpInside];
+    self.logTextView = [UITextView new];
+    self.logTextView.editable = NO;
+    self.logTextView.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
+    self.logTextView.layer.cornerRadius = 10;
+    self.logTextView.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:1.0];
+    self.logTextView.hidden = YES;
+    [self.logTextView.heightAnchor constraintEqualToConstant:320].active = YES;
+    [self updateLogToggleTitle];
+
+    UILabel *footer = [self labelWithStyle:UIFontTextStyleFootnote color:[UIColor secondaryLabelColor]];
+    footer.text = @"App 可以切到背景繼續運作，但不要從多工畫面把它滑掉。";
+
+    UILabel *appTitle = [self labelWithStyle:UIFontTextStyleLargeTitle color:[UIColor labelColor]];
+    appTitle.font = [UIFont systemFontOfSize:appTitle.font.pointSize weight:UIFontWeightBold];
+    appTitle.text = @"SocksBypass";
+
+    UIStackView *content = [[UIStackView alloc] initWithArrangedSubviews:@[
+        appTitle,
+        [self cardWithTitle:@"狀態" content:statusStack],
+        [self cardWithTitle:@"電腦端設定" content:setupStack],
+        [self cardWithTitle:@"目前速度" content:trafficStack],
+        [self cardWithTitle:@"使用中的裝置" content:self.deviceListStack],
+        footer,
+        self.logToggleButton,
+        self.logTextView,
+    ]];
+    content.axis = UILayoutConstraintAxisVertical;
+    content.spacing = 24;
+    [content setCustomSpacing:8 afterView:self.logToggleButton];
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIScrollView *scrollView = [UIScrollView new];
+    scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    [scrollView addSubview:content];
+    [self.view addSubview:scrollView];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [scrollView.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [scrollView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [scrollView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [scrollView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [content.topAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.topAnchor constant:16],
+        [content.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor constant:-24],
+        [content.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:16],
+        [content.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
+        [content.widthAnchor constraintLessThanOrEqualToConstant:600],
+    ]];
+
+    [self refreshStatus];
+    [self refreshClients];
+}
+
+- (void)refreshStatus {
+    UIColor *color;
+    NSString *title, *detail;
+    switch (self.serverState) {
+        case ServerStateStarting:
+            color = [UIColor systemGrayColor];
+            title = @"啟動中…";
+            detail = @"正在尋找網路介面";
+            break;
+        case ServerStateRunning:
+            color = [UIColor systemGreenColor];
+            title = @"運作中";
+            detail = self.activeClients.count > 0
+                ? [NSString stringWithFormat:@"有 %lu 台裝置正在透過這支 iPhone 上網", (unsigned long)self.activeClients.count]
+                : @"等待電腦連線。請在電腦填入下方的設定。";
+            break;
+        case ServerStateNoNetwork:
+            color = [UIColor systemRedColor];
+            title = @"無法啟動";
+            detail = @"找不到可用的網路。請先開啟「個人熱點」或連上 Wi-Fi，再重新打開 App。";
+            break;
+        case ServerStateFailed:
+            color = [UIColor systemRedColor];
+            title = @"已停止";
+            detail = @"代理伺服器意外停止，請重新打開 App。";
+            break;
+    }
+    self.statusDot.backgroundColor = color;
+    self.statusTitleLabel.text = title;
+    self.statusDetailLabel.text = detail;
+    BOOL running = self.serverState == ServerStateRunning;
+    self.addressValueLabel.text = running ? self.ipAddress : @"—";
+    self.portValueLabel.text = running ? [NSString stringWithFormat:@"%d", self.port] : @"—";
+}
+
+- (void)refreshClients {
+    for (UIView *view in self.deviceListStack.arrangedSubviews) {
+        [view removeFromSuperview];
+    }
+    NSArray<NSString *> *ips = [self.activeClients.allKeys sortedArrayUsingSelector:@selector(compare:)];
+    if (ips.count == 0) {
+        UILabel *empty = [self labelWithStyle:UIFontTextStyleBody color:[UIColor secondaryLabelColor]];
+        empty.text = @"目前沒有裝置連線";
+        [self.deviceListStack addArrangedSubview:empty];
+    }
+    for (NSString *ip in ips) {
+        UILabel *name = [self labelWithStyle:UIFontTextStyleBody color:[UIColor labelColor]];
+        name.text = [@"💻 " stringByAppendingString:ip];
+        UILabel *count = [self labelWithStyle:UIFontTextStyleSubheadline color:[UIColor secondaryLabelColor]];
+        count.text = [NSString stringWithFormat:@"%@ 條連線", self.activeClients[ip]];
+        count.textAlignment = NSTextAlignmentRight;
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[name, count]];
+        [self.deviceListStack addArrangedSubview:row];
+    }
+    [self refreshStatus];
+}
+
+- (void)copyValue:(NSString *)value from:(UILabel *)label {
+    if (self.serverState != ServerStateRunning) return;
+    [UIPasteboard generalPasteboard].string = value;
+    label.text = @"已拷貝 ✓";
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self refreshStatus];
+    });
+}
+
+- (void)copyAddress:(UITapGestureRecognizer *)sender {
+    [self copyValue:self.ipAddress from:self.addressValueLabel];
+}
+
+- (void)copyPort:(UITapGestureRecognizer *)sender {
+    [self copyValue:[NSString stringWithFormat:@"%d", self.port] from:self.portValueLabel];
+}
+
+- (void)updateLogToggleTitle {
+    [self.logToggleButton setTitle:self.logTextView.hidden ? @"顯示詳細記錄 ▾" : @"隱藏詳細記錄 ▴"
+                          forState:UIControlStateNormal];
+}
+
+- (void)toggleLog {
+    self.logTextView.hidden = !self.logTextView.hidden;
+    [self updateLogToggleTitle];
+    [self.logTextView scrollRangeToVisible:NSMakeRange(self.logTextView.text.length, 0)];
+}
+
+#pragma mark - 生命週期
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     sharedInstance = self;
-    
-    // Configure log text view
-    self.logTextView.font = [UIFont fontWithName:@"Menlo-Regular" size:9.0];
-    self.logTextView.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
-    self.logTextView.layer.cornerRadius = 8.0;
-    self.logTextView.layer.borderWidth = 1.0;
-    self.logTextView.layer.borderColor = [UIColor colorWithWhite:0.3 alpha:1.0].CGColor;
-    self.logTextView.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:1.0];
-    
-    // Enable attributed text
-    self.logTextView.attributedText = [[NSAttributedString alloc] init];
-    
+    self.activeClients = [NSMutableDictionary dictionary];
+    self.serverState = ServerStateStarting;
+    [self buildInterface];
+
     freopen("/dev/null", "w", stdout);
     dup2(STDOUT_FILENO, STDERR_FILENO);
-    
+
     [self logMessage:@"[SOCKS] View controller loaded"];
 
     int port = 9876;
+    self.port = port;
     [self logMessage:[NSString stringWithFormat:@"[SOCKS] Initializing SOCKS server on port %d", port]];
-    
+
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         char portbuf[32];
-        sprintf(portbuf, "%d", port);
+        snprintf(portbuf, sizeof(portbuf), "%d", port);
         const char *argv[] = {"microsocks", "-p", portbuf, NULL};
-        
+
         NSString *ipAddress = [AppDelegate deviceIPAddress];
         if ([ipAddress isEqualToString:@"127.0.0.1"]) {
             [self logMessage:@"[SOCKS] No matching interface found, using fallback IP address"];
             [self logMessage:@"[SOCKS] Stopping server due to no valid interface"];
             dispatch_async(dispatch_get_main_queue(), ^{
-                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"No Network Interface"
-                                                                             message:@"Please enable Personal Hotspot in Settings and try again."
-                                                                      preferredStyle:UIAlertControllerStyleAlert];
-                UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault
-                                                               handler:^(UIAlertAction * action) {
-                    [self.statusLabel setText:@"Not Running - No Network Interface"];
-                    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-                        [self.audioPlayer stop];
-                        [[AVAudioSession sharedInstance] setActive:NO error:nil];
-                    });
-                    [[UIApplication sharedApplication] performSelector:NSSelectorFromString(@"terminate:") withObject:nil afterDelay:0.0];
-                }];
-                [alert addAction:okAction];
-                [self presentViewController:alert animated:YES completion:nil];
+                self.serverState = ServerStateNoNetwork;
+                [self refreshStatus];
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                    [self.audioPlayer stop];
+                    [[AVAudioSession sharedInstance] setActive:NO error:nil];
+                });
             });
             return;
         }
         [self logMessage:[NSString stringWithFormat:@"[SOCKS] Starting server at %@:%d", ipAddress, port]];
-        
+
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.statusLabel setText:[NSString stringWithFormat:@"Running at %@:%d", ipAddress, port]];
+            self.ipAddress = ipAddress;
+            self.serverState = ServerStateRunning;
+            [self refreshStatus];
         });
-        
+
         int status = socks_main(3, argv);
         [self logMessage:[NSString stringWithFormat:@"[SOCKS] Server exited with status: %d", status]];
-        
+
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.statusLabel setText:[NSString stringWithFormat:@"Failed to start: %d", status]];
+            self.serverState = ServerStateFailed;
+            [self refreshStatus];
         });
     });
-    
+
     [self logMessage:@"[SOCKS] Setting up background audio"];
     NSURL *url = [NSURL fileURLWithPath:[[NSBundle mainBundle] pathForResource:@"blank" ofType:@"wav"]];
     if (url) {
@@ -171,18 +467,18 @@ void custom_log(const char *format, ...) {
                 [self logMessage:[NSString stringWithFormat:@"[SOCKS] Error creating audio player: %@", error.localizedDescription]];
             } else {
                 [self logMessage:@"[SOCKS] Successfully created audio player"];
-                [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback 
-                                               withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+                [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback
+                                               withOptions:AVAudioSessionCategoryOptionMixWithOthers
                                                      error:&error];
                 if (error) {
                     [self logMessage:[NSString stringWithFormat:@"[SOCKS] Error setting audio session category: %@", error.localizedDescription]];
                 }
-                
+
                 [[AVAudioSession sharedInstance] setActive:YES error:&error];
                 if (error) {
                     [self logMessage:[NSString stringWithFormat:@"[SOCKS] Error activating audio session: %@", error.localizedDescription]];
                 }
-                
+
                 [self.audioPlayer setVolume:0.01];
                 [self.audioPlayer setNumberOfLoops:-1];
                 [self.audioPlayer prepareToPlay];
@@ -193,20 +489,13 @@ void custom_log(const char *format, ...) {
     } else {
         [self logMessage:@"[SOCKS] Error: Could not find blank.wav resource"];
     }
-    
+
     // Add stats update timer
     statsUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                       target:self
                                                     selector:@selector(updateStatsDisplay)
                                                     userInfo:nil
                                                      repeats:YES];
-    
-    // 確保初始文本也使用正確的字體
-    NSMutableAttributedString *initialText = [[NSMutableAttributedString alloc] initWithString:@""];
-    [initialText addAttribute:NSFontAttributeName 
-                       value:[UIFont fontWithName:@"Menlo-Regular" size:9.0] 
-                       range:NSMakeRange(0, 0)];
-    self.logTextView.attributedText = initialText;
 }
 
 - (void)didReceiveMemoryWarning {
@@ -217,18 +506,18 @@ void custom_log(const char *format, ...) {
 - (void)logMessage:(NSString *)message {
     NSLog(@"%@", message);
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date] 
-                                                          dateStyle:NSDateFormatterNoStyle 
+        NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
+                                                          dateStyle:NSDateFormatterNoStyle
                                                           timeStyle:NSDateFormatterMediumStyle];
-        
+
         NSMutableAttributedString *attributedMessage = [[NSMutableAttributedString alloc] init];
-        
+
         // Timestamp in gray
-        NSAttributedString *timeString = [[NSAttributedString alloc] 
+        NSAttributedString *timeString = [[NSAttributedString alloc]
             initWithString:[NSString stringWithFormat:@"[%@]", timestamp]
             attributes:@{NSForegroundColorAttributeName: [UIColor grayColor]}];
         [attributedMessage appendAttributedString:timeString];
-        
+
         // Message with color based on content
         UIColor *messageColor;
         if ([message containsString:@"Error"] || [message containsString:@"Failed"] || [message containsString:@"failed"]) {
@@ -240,21 +529,21 @@ void custom_log(const char *format, ...) {
         } else {
             messageColor = [UIColor whiteColor];
         }
-        
-        NSAttributedString *contentString = [[NSAttributedString alloc] 
+
+        NSAttributedString *contentString = [[NSAttributedString alloc]
             initWithString:[NSString stringWithFormat:@"%@\n", message]
             attributes:@{NSForegroundColorAttributeName: messageColor}];
         [attributedMessage appendAttributedString:contentString];
-        
-        NSMutableAttributedString *currentText = [[NSMutableAttributedString alloc] 
+
+        NSMutableAttributedString *currentText = [[NSMutableAttributedString alloc]
             initWithAttributedString:self.logTextView.attributedText ?: [[NSAttributedString alloc] init]];
         [currentText appendAttributedString:attributedMessage];
-        
+
         // 為整個文本設置字體
-        [currentText addAttribute:NSFontAttributeName 
-                           value:[UIFont fontWithName:@"Menlo-Regular" size:9.0] 
+        [currentText addAttribute:NSFontAttributeName
+                           value:[UIFont fontWithName:@"Menlo-Regular" size:9.0]
                            range:NSMakeRange(0, currentText.length)];
-        
+
         // 檢查並限制行數
         NSArray *lines = [currentText.string componentsSeparatedByString:@"\n"];
         if (lines.count > MAX_LOG_LINES) {
@@ -262,9 +551,11 @@ void custom_log(const char *format, ...) {
                 [[lines subarrayWithRange:NSMakeRange(0, lines.count - MAX_LOG_LINES)] componentsJoinedByString:@"\n"]];
             [currentText deleteCharactersInRange:deleteRange];
         }
-        
+
         self.logTextView.attributedText = currentText;
-        [self.logTextView scrollRangeToVisible:NSMakeRange(self.logTextView.text.length, 0)];
+        if (!self.logTextView.hidden) {
+            [self.logTextView scrollRangeToVisible:NSMakeRange(self.logTextView.text.length, 0)];
+        }
     });
 }
 
@@ -283,22 +574,12 @@ void custom_log(const char *format, ...) {
     }
 }
 
-+ (void)logConnection:(NSString *)clientIP port:(int)clientPort {
-    NSString *message = [NSString stringWithFormat:@"[SOCKS] New connection from %@:%d", clientIP, clientPort];
-    [ViewController logMessage:message];
-}
-
-+ (void)logDisconnection:(NSString *)clientIP port:(int)clientPort {
-    NSString *message = [NSString stringWithFormat:@"[SOCKS] Client disconnected %@:%d", clientIP, clientPort];
-    [ViewController logMessage:message];
-}
-
 - (void)updateStatsDisplay {
     pthread_mutex_lock(&pending_stats_mutex);
     uint64_t uploadBytes = pending_upload_bytes;
     uint64_t downloadBytes = pending_download_bytes;
     pthread_mutex_unlock(&pending_stats_mutex);
-    
+
     [self updateStatsWithUpload:uploadBytes download:downloadBytes];
 }
 

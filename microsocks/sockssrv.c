@@ -42,6 +42,8 @@
 
 extern void custom_log(const char *format, ...);
 extern void update_traffic_stats_ui(uint64_t upload, uint64_t download);
+extern void client_connected(const char *clientIP);
+extern void client_disconnected(const char *clientIP);
 
 /* timeout in microseconds on resource exhaustion to prevent excessive
    cpu usage. */
@@ -714,6 +716,7 @@ static void* clientthread(void *data) {
     
     // Log new connection
     dolog("New SOCKS client connected from %s:%d", clientname, port);
+    client_connected(clientname);
     
     t->state = SS_1_CONNECTED;
     unsigned char buf[1024];
@@ -807,6 +810,7 @@ static void* clientthread(void *data) {
 breakloop:
     // Log disconnection
     dolog("SOCKS client disconnected: %s:%d", clientname, port);
+    client_disconnected(clientname);
     close(t->client.fd);
     t->done = 1;
 
