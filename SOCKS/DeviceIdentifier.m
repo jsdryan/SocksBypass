@@ -8,6 +8,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <errno.h>
+#include <dns_sd.h>
+
+extern void custom_log(const char *format, ...);
 
 #define QUERY_TIMEOUT_MS 1500
 
@@ -22,8 +26,11 @@ static ssize_t udpQuery(const char *ip, int port, const uint8_t *query, size_t q
     addr.sin_port = htons(port);
     inet_pton(AF_INET, ip, &addr.sin_addr);
     ssize_t n = -1;
-    if (sendto(fd, query, queryLen, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)queryLen) {
+    if (sendto(fd, query, queryLen, 0, (struct sockaddr *)&addr, sizeof(addr)) != (ssize_t)queryLen) {
+        custom_log("[ID] %s:%d send failed: %s", ip, port, strerror(errno));
+    } else {
         n = recv(fd, reply, replyCap, 0);
+        if (n < 0) custom_log("[ID] %s:%d no reply: %s", ip, port, strerror(errno));
     }
     close(fd);
     return n;
@@ -52,7 +59,54 @@ static int readDNSName(const uint8_t *msg, int len, int off, NSMutableString *ou
     return -1;
 }
 
-// Bonjour 反查：對該 IP 的 5353 埠問「這個位址叫什麼名字」
+static NSString *reverseName(NSString *ip) {
+    NSArray<NSString *> *octets = [ip componentsSeparatedByString:@"."];
+    return [[octets.reverseObjectEnumerator.allObjects componentsJoinedByString:@"."] stringByAppendingString:@".in-addr.arpa."];
+}
+
+static NSString *stripLocal(NSMutableString *name) {
+    if ([name hasSuffix:@"."]) [name deleteCharactersInRange:NSMakeRange(name.length - 1, 1)];
+    if ([name hasSuffix:@".local"]) [name deleteCharactersInRange:NSMakeRange(name.length - 6, 6)];
+    return name.length ? name : nil;
+}
+
+static void ptrReply(DNSServiceRef ref, DNSServiceFlags flags, uint32_t interfaceIndex, DNSServiceErrorType error,
+                     const char *fullname, uint16_t rrtype, uint16_t rrclass, uint16_t rdlen, const void *rdata,
+                     uint32_t ttl, void *context) {
+    NSMutableString *result = (__bridge NSMutableString *)context;
+    if (error != kDNSServiceErr_NoError || rrtype != kDNSServiceType_PTR || result.length) return;
+    readDNSName(rdata, rdlen, 0, result);
+}
+
+// Bonjour 反查（透過系統的 mDNSResponder）。iOS 不一定讓 App 自己對 5353 埠送封包，所以先走這條
+static NSString *bonjourName(NSString *ip) {
+    NSMutableString *result = [NSMutableString string];
+    DNSServiceRef ref = NULL;
+    DNSServiceErrorType err = DNSServiceQueryRecord(&ref, kDNSServiceFlagsForceMulticast, kDNSServiceInterfaceIndexAny,
+                                                    reverseName(ip).UTF8String, kDNSServiceType_PTR, kDNSServiceClass_IN,
+                                                    ptrReply, (__bridge void *)result);
+    if (err != kDNSServiceErr_NoError) {
+        custom_log("[ID] %s Bonjour query error %d", ip.UTF8String, err);
+        return nil;
+    }
+    int fd = DNSServiceRefSockFD(ref);
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:QUERY_TIMEOUT_MS / 1000.0];
+    while (result.length == 0) {
+        NSTimeInterval left = [deadline timeIntervalSinceNow];
+        if (left <= 0) break;
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(fd, &set);
+        struct timeval tv = {(int)left, (int)((left - (int)left) * 1e6)};
+        if (select(fd + 1, &set, NULL, NULL, &tv) <= 0) break;
+        if (DNSServiceProcessResult(ref) != kDNSServiceErr_NoError) break;
+    }
+    DNSServiceRefDeallocate(ref);
+    if (result.length == 0) custom_log("[ID] %s Bonjour: no answer", ip.UTF8String);
+    return stripLocal(result);
+}
+
+// Bonjour 反查：直接對該 IP 的 5353 埠問「這個位址叫什麼名字」
 static NSString *mdnsName(NSString *ip) {
     NSArray<NSString *> *octets = [ip componentsSeparatedByString:@"."];
     if (octets.count != 4) return nil;
@@ -90,8 +144,7 @@ static NSString *mdnsName(NSString *ip) {
         if (type == 12) {
             NSMutableString *name = [NSMutableString string];
             if (readDNSName(r, n, p, name) < 0) return nil;
-            if ([name hasSuffix:@".local"]) [name deleteCharactersInRange:NSMakeRange(name.length - 6, 6)];
-            return name.length ? name : nil;
+            return stripLocal(name);
         }
         p += rdlen;
     }
@@ -138,12 +191,13 @@ static NSString *appleKind(NSString *name) {
 + (void)identifyIP:(NSString *)ip completion:(void (^)(NSString *, NSString *, NSString *))completion {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSString *mac = nil;
-        NSString *name = mdnsName(ip);
+        NSString *name = bonjourName(ip) ?: mdnsName(ip);
         NSString *kind = name ? appleKind(name) : nil;
         if (!name) {
             name = netbiosName(ip, &mac);
             kind = name ? @"Windows" : @"未知裝置";
         }
+        custom_log("[ID] %s -> %s (%s)", ip.UTF8String, (name ?: @"?").UTF8String, kind.UTF8String);
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(name, kind, mac);
         });

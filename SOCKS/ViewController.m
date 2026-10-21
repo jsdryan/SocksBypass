@@ -115,12 +115,15 @@ void client_connected(const char *clientIP) {
     dispatch_async(dispatch_get_main_queue(), ^{
         ViewController *vc = sharedInstance;
         vc.activeClients[ip] = @(vc.activeClients[ip].integerValue + 1);
-        if (!vc.deviceInfo[ip]) {
+        // 查不到的裝置 30 秒後再試（例如第一次查詢時還沒允許「區域網路」權限）
+        NSDate *retryAfter = vc.deviceInfo[ip][@"retryAfter"];
+        if (!vc.deviceInfo[ip] || (retryAfter && retryAfter.timeIntervalSinceNow < 0)) {
             vc.deviceInfo[ip] = @{@"kind": @"辨識中…"};
             [DeviceIdentifier identifyIP:ip completion:^(NSString *name, NSString *kind, NSString *mac) {
                 NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:kind forKey:@"kind"];
                 info[@"name"] = name;
                 info[@"mac"] = mac;
+                if (!name) info[@"retryAfter"] = [NSDate dateWithTimeIntervalSinceNow:30];
                 vc.deviceInfo[ip] = info;
                 [vc refreshClients];
             }];
