@@ -44,6 +44,7 @@ extern void custom_log(const char *format, ...);
 extern void update_traffic_stats_ui(uint64_t upload, uint64_t download);
 extern void client_connected(const char *clientIP);
 extern void client_disconnected(const char *clientIP);
+extern void client_traffic(const char *clientIP, uint64_t upload, uint64_t download);
 
 /* timeout in microseconds on resource exhaustion to prevent excessive
    cpu usage. */
@@ -330,7 +331,7 @@ static void update_traffic_stats(size_t uploaded, size_t downloaded) {
     update_traffic_stats_ui(total_upload_bytes, total_download_bytes);
     pthread_mutex_unlock(&stats_mutex);
 }
-static void copyloop(int fd1, int fd2) {
+static void copyloop(int fd1, int fd2, const char *clientIP) {
     int kq = kqueue();
     if (kq == -1) {
         perror("kqueue");
@@ -382,8 +383,10 @@ static void copyloop(int fd1, int fd2) {
 
                 if (infd == fd1) {
                     update_traffic_stats(n, 0);
+                    client_traffic(clientIP, n, 0);
                 } else {
                     update_traffic_stats(0, n);
+                    client_traffic(clientIP, 0, n);
                 }
             }
         }
@@ -769,7 +772,7 @@ static void* clientthread(void *data) {
                         close(remotefd);
                         goto breakloop;
                     }
-                    copyloop(t->client.fd, remotefd);
+                    copyloop(t->client.fd, remotefd, clientname);
                     close(remotefd);
                     goto breakloop;
                 } else if (cmd == UDP_ASSOCIATE) {

@@ -39,6 +39,10 @@ typedef NS_ENUM(NSInteger, ServerState) {
 @property (strong, nonatomic) UILabel *uploadTotalLabel;
 @property (strong, nonatomic) UILabel *downloadTotalLabel;
 @property (strong, nonatomic) UIStackView *deviceListStack;
+@property (strong, nonatomic) NSMutableDictionary<NSString *, UILabel *> *clientSpeedLabels;   // IP → 速度標籤
+@property (strong, nonatomic) NSMutableDictionary<NSString *, NSString *> *clientSpeedTexts;   // IP → 最近一次的速度文字
+@property (strong, nonatomic) NSDictionary<NSString *, NSArray<NSNumber *> *> *lastClientBytes; // IP → @[上傳, 下載]
+@property (strong, nonatomic) NSDate *lastClientSampleTime;
 @property (strong, nonatomic) UIButton *logToggleButton;
 
 @end
@@ -50,6 +54,7 @@ extern void custom_log(const char *format, ...);
 extern void update_traffic_stats_ui(uint64_t uploadBytes, uint64_t downloadBytes);
 extern void client_connected(const char *clientIP);
 extern void client_disconnected(const char *clientIP);
+extern void client_traffic(const char *clientIP, uint64_t upload, uint64_t download);
 static ViewController *sharedInstance = nil;
 
 #define MAX_LOG_LINES 1000
@@ -61,6 +66,17 @@ static NSTimer *statsUpdateTimer;
 static uint64_t pending_upload_bytes = 0;
 static uint64_t pending_download_bytes = 0;
 static pthread_mutex_t pending_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// 每台裝置（IP）的累計流量。轉送迴圈每讀一次就呼叫，所以用純 C 表格加鎖，不經過 Objective-C 物件
+#define MAX_CLIENT_STATS 64
+typedef struct {
+    char ip[64];
+    uint64_t upload;
+    uint64_t download;
+} ClientStats;
+static ClientStats client_stats[MAX_CLIENT_STATS];
+static int client_stats_count = 0;
+static pthread_mutex_t client_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 - (NSString *)formatBytes:(uint64_t)bytes {
     if (bytes < 1024) return [NSString stringWithFormat:@"%llu B", bytes];
@@ -108,6 +124,21 @@ void update_traffic_stats_ui(uint64_t uploadBytes, uint64_t downloadBytes) {
     pending_upload_bytes = uploadBytes;
     pending_download_bytes = downloadBytes;
     pthread_mutex_unlock(&pending_stats_mutex);
+}
+
+void client_traffic(const char *clientIP, uint64_t upload, uint64_t download) {
+    pthread_mutex_lock(&client_stats_mutex);
+    int i = 0;
+    while (i < client_stats_count && strcmp(client_stats[i].ip, clientIP) != 0) i++;
+    if (i == client_stats_count && client_stats_count < MAX_CLIENT_STATS) {
+        strlcpy(client_stats[i].ip, clientIP, sizeof(client_stats[i].ip));
+        client_stats_count++;
+    }
+    if (i < client_stats_count) {
+        client_stats[i].upload += upload;
+        client_stats[i].download += download;
+    }
+    pthread_mutex_unlock(&client_stats_mutex);
 }
 
 void client_connected(const char *clientIP) {
@@ -362,6 +393,61 @@ void custom_log(const char *format, ...) {
     self.portValueLabel.text = running ? [NSString stringWithFormat:@"%d", self.port] : @"—";
 }
 
+- (UIView *)iconForKind:(NSString *)kind {
+    UIView *container = [UIView new];
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [container.widthAnchor constraintEqualToConstant:32],
+        [container.heightAnchor constraintEqualToConstant:32],
+    ]];
+    if ([kind isEqualToString:@"Windows"]) {
+        // 微軟四色方塊
+        NSArray<UIColor *> *colors = @[
+            [UIColor colorWithRed:0xF2/255.0 green:0x50/255.0 blue:0x22/255.0 alpha:1],
+            [UIColor colorWithRed:0x7F/255.0 green:0xBA/255.0 blue:0x00/255.0 alpha:1],
+            [UIColor colorWithRed:0x00/255.0 green:0xA4/255.0 blue:0xEF/255.0 alpha:1],
+            [UIColor colorWithRed:0xFF/255.0 green:0xB9/255.0 blue:0x00/255.0 alpha:1],
+        ];
+        CGFloat size = 12, gap = 2, origin = (32 - size * 2 - gap) / 2;
+        for (NSUInteger i = 0; i < 4; i++) {
+            UIView *square = [[UIView alloc] initWithFrame:CGRectMake(origin + (i % 2) * (size + gap),
+                                                                      origin + (i / 2) * (size + gap), size, size)];
+            square.backgroundColor = colors[i];
+            [container addSubview:square];
+        }
+        return container;
+    }
+    BOOL apple = [@[@"Mac", @"iPhone", @"iPad", @"Apple 裝置"] containsObject:kind];
+    UIImage *image = nil;
+    if (apple) {
+        if (@available(iOS 16.0, *)) image = [UIImage systemImageNamed:@"apple.logo"];
+    } else {
+        image = [UIImage systemImageNamed:@"questionmark.circle"];
+    }
+    UIView *glyph;
+    if (image) {
+        UIImageView *imageView = [[UIImageView alloc] initWithImage:image];
+        imageView.contentMode = UIViewContentModeScaleAspectFit;
+        imageView.tintColor = apple ? [UIColor labelColor] : [UIColor secondaryLabelColor];
+        glyph = imageView;
+    } else {
+        UILabel *label = [UILabel new];   // iOS 15 沒有 apple.logo，改用系統字型裡的蘋果符號
+        label.text = @"\uF8FF";
+        label.font = [UIFont systemFontOfSize:28];
+        label.textAlignment = NSTextAlignmentCenter;
+        glyph = label;
+    }
+    glyph.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:glyph];
+    [NSLayoutConstraint activateConstraints:@[
+        [glyph.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+        [glyph.centerYAnchor constraintEqualToAnchor:container.centerYAnchor],
+        [glyph.widthAnchor constraintEqualToConstant:28],
+        [glyph.heightAnchor constraintEqualToConstant:28],
+    ]];
+    return container;
+}
+
 - (void)refreshClients {
     for (UIView *view in self.deviceListStack.arrangedSubviews) {
         [view removeFromSuperview];
@@ -372,14 +458,11 @@ void custom_log(const char *format, ...) {
         empty.text = @"目前沒有裝置連線";
         [self.deviceListStack addArrangedSubview:empty];
     }
-    NSDictionary *icons = @{@"Mac": @"💻", @"Windows": @"🖥️", @"iPhone": @"📱", @"iPad": @"📱", @"Apple 裝置": @"🍎"};
+    [self.clientSpeedLabels removeAllObjects];
     for (NSString *ip in ips) {
         NSDictionary *info = self.deviceInfo[ip];
         NSString *kind = info[@"kind"] ?: @"辨識中…";
-        UILabel *icon = [UILabel new];
-        icon.font = [UIFont systemFontOfSize:28];
-        icon.text = icons[kind] ?: @"❔";
-        [icon setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        UIView *icon = [self iconForKind:kind];
         UILabel *name = [self labelWithStyle:UIFontTextStyleBody color:[UIColor labelColor]];
         name.text = info[@"name"] ?: kind;
         UILabel *detail = [self labelWithStyle:UIFontTextStyleFootnote color:[UIColor secondaryLabelColor]];
@@ -395,7 +478,14 @@ void custom_log(const char *format, ...) {
         UIStackView *text = [[UIStackView alloc] initWithArrangedSubviews:@[name, detail, mac]];
         text.axis = UILayoutConstraintAxisVertical;
         text.spacing = 2;
-        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[icon, text]];
+        UILabel *speed = [self labelWithStyle:UIFontTextStyleFootnote color:[UIColor labelColor]];
+        speed.font = [UIFont monospacedDigitSystemFontOfSize:speed.font.pointSize weight:UIFontWeightMedium];
+        speed.textAlignment = NSTextAlignmentRight;
+        speed.text = self.clientSpeedTexts[ip] ?: @"↓ 0.00 MB/s\n↑ 0.00 MB/s";
+        [speed setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [speed setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        self.clientSpeedLabels[ip] = speed;
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[icon, text, speed]];
         row.spacing = 12;
         row.alignment = UIStackViewAlignmentCenter;
         [self.deviceListStack addArrangedSubview:row];
@@ -438,6 +528,8 @@ void custom_log(const char *format, ...) {
     sharedInstance = self;
     self.activeClients = [NSMutableDictionary dictionary];
     self.deviceInfo = [NSMutableDictionary dictionary];
+    self.clientSpeedLabels = [NSMutableDictionary dictionary];
+    self.clientSpeedTexts = [NSMutableDictionary dictionary];
     self.serverState = ServerStateStarting;
     [self buildInterface];
 
@@ -611,6 +703,31 @@ void custom_log(const char *format, ...) {
     pthread_mutex_unlock(&pending_stats_mutex);
 
     [self updateStatsWithUpload:uploadBytes download:downloadBytes];
+    [self updateClientSpeeds];
+}
+
+- (void)updateClientSpeeds {
+    NSMutableDictionary<NSString *, NSArray<NSNumber *> *> *bytes = [NSMutableDictionary dictionary];
+    pthread_mutex_lock(&client_stats_mutex);
+    for (int i = 0; i < client_stats_count; i++) {
+        bytes[@(client_stats[i].ip)] = @[@(client_stats[i].upload), @(client_stats[i].download)];
+    }
+    pthread_mutex_unlock(&client_stats_mutex);
+
+    NSDate *now = [NSDate date];
+    NSTimeInterval elapsed = self.lastClientSampleTime ? [now timeIntervalSinceDate:self.lastClientSampleTime] : 0;
+    if (elapsed > 0) {
+        for (NSString *ip in bytes) {
+            NSArray<NSNumber *> *before = self.lastClientBytes[ip] ?: @[@0, @0];
+            double up = (bytes[ip][0].unsignedLongLongValue - before[0].unsignedLongLongValue) / elapsed / (1024.0 * 1024.0);
+            double down = (bytes[ip][1].unsignedLongLongValue - before[1].unsignedLongLongValue) / elapsed / (1024.0 * 1024.0);
+            NSString *text = [NSString stringWithFormat:@"↓ %.2f MB/s\n↑ %.2f MB/s", down, up];
+            self.clientSpeedTexts[ip] = text;
+            self.clientSpeedLabels[ip].text = text;
+        }
+    }
+    self.lastClientBytes = bytes;
+    self.lastClientSampleTime = now;
 }
 
 @end
